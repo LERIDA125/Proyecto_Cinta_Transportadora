@@ -1,0 +1,7 @@
+# Ignorar archivos compilados y configuraciones locales de Code::Blocks
+*.exe
+*.o
+*.layout
+*.depend
+bin/
+obj/
