@@ -14,20 +14,19 @@ struct Paquete {
 };
 
 struct Sistema {
-    // Usamos arreglos dinámicos, tratados lógicamente como colas (FIFO).
-    // Esto permite iterar sin hacer pop/push.
-    std::vector<Paquete> wq; 
-    std::vector<Paquete> pq; 
-
+    std::vector<Paquete> wq;
+    std::vector<Paquete> pq;
     std::map<int, long long> registro_cinta;
 
-    // Mutex para exclusión mutua estricta de las variables compartidas
+    // Mutex para exclusión mutua de las estructuras
     std::mutex mtx_estanteria;
     std::mutex mtx_cinta;
     std::mutex mtx_id;
-    
-    // Semáforo común (contador) SOLO para la sincronización de hilos dormidos
-    Semaforo hay_paquetes;
+
+    // SEMÁFOROS OBLIGATORIOS (Estrategia Clásica)
+    Semaforo hay_paquetes;      // Cuenta cuántos paquetes hay en la estantería (Inicia en 0)
+    Semaforo lugares_en_cinta;  // Controla el límite estricto de 5 en la cinta (Inicia en 5)
+    Semaforo items_en_cinta;    // Cuenta cuántos paquetes listos para salir hay en la cinta (Inicia en 0)
 
     int id_global = 0, producidos = 0, proc_alta = 0, proc_baja = 0;
     long long espera_alta = 0, espera_baja = 0;
