@@ -15,52 +15,51 @@ void productor(Sistema& s, int cant) {
         p.prioridad = rand() % 2;
         p.fecha_creacion = tiempo_ms();
 
-        s.mtx_id.lock(); // Uso de Mutex en vez de wait
+        s.mtx_id.lock(); 
         p.id = ++s.id_global;
         s.producidos++;
-        s.mtx_id.unlock(); // Uso de Mutex en vez de signal
+        s.mtx_id.unlock(); 
 
         std::this_thread::sleep_for(std::chrono::milliseconds(90));
 
         s.mtx_estanteria.lock();
-        s.wq.push_back(p); // Ingresa al final del arreglo (Cola)
+        s.wq.push_back(p); 
         s.mtx_estanteria.unlock();
 
-        signal(s.hay_paquetes); // Semáforo contador para avisar
+        signal(s.hay_paquetes); 
     }
 }
 
 void consumidor(Sistema& s) {
     while (true) {
-        // CONDICIÓN DE SALIDA
+        Paquete p_transf, p_proc;
+        bool transferir = false, procesar = false;
+
         s.mtx_estanteria.lock();
+
+        // CONDICIÓN DE SALIDA
         if (s.fin && s.wq.empty() && s.pq.empty()) {
             s.mtx_estanteria.unlock();
             break;
         }
-        s.mtx_estanteria.unlock();
-
-        // 1. INTENTAR TRANSFERIR (De Estantería a Cinta)
-        // Solo entramos si hay paquetes en la estantería Y hay lugar en la cinta
-        // Esto elimina el "if (s.pq.size() < 5)" problemático.
-
-        bool puede_procesar = false;
-        Paquete p_proc;
-
-        bool puede_transferir = false;
-        Paquete p_transf;
 
         long long ahora = tiempo_ms();
 
-        // Una forma segura de testear sin bloquearse eternamente si no hay elementos:
-        s.mtx_estanteria.lock();
-        if (!s.wq.empty() && s.pq.size() < 5) {
-            // Busco prioridad o inanición (Tu algoritmo actual)
+        // 1. EVALUAR CINTA (Prioridad: Sacar paquetes terminados)
+        if (!s.pq.empty() && (ahora - s.registro_cinta[s.pq.front().id] >= 550)) {
+            p_proc = s.pq.front();
+            s.pq.erase(s.pq.begin()); 
+            procesar = true;
+        }
+        
+        // 2. EVALUAR ESTANTERÍA (Transferir a la cinta)
+        // Mantenemos la lógica de pq.size() < 5 para no extraer de la estantería si la cinta está llena
+        else if (s.pq.size() < 5 && !s.wq.empty()) {
+            
             int indice_elegido = -1;
             for (size_t i = 0; i < s.wq.size(); ++i) {
                 if (s.wq[i].prioridad == 0 && (ahora - s.wq[i].fecha_creacion >= 6000)) {
-                    indice_elegido = i;
-                    break;
+                    indice_elegido = i; break;
                 }
             }
             if (indice_elegido == -1) {
@@ -72,12 +71,33 @@ void consumidor(Sistema& s) {
 
             p_transf = s.wq[indice_elegido];
             s.wq.erase(s.wq.begin() + indice_elegido);
-            puede_transferir = true;
+            transferir = true;
         }
+
+        // 3. ESPERA PASIVA (Sin consumir CPU al 100%)
+        else {
+            if (s.pq.empty()) {
+                s.mtx_estanteria.unlock();
+                wait(s.hay_paquetes); // Se duerme hasta que un productor genere algo
+            } else {
+                long long faltante = 550 - (ahora - s.registro_cinta[s.pq.front().id]);
+                s.mtx_estanteria.unlock();
+                
+                if (faltante > 0) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(faltante));
+                }
+            }
+            continue; // Vuelve a evaluar el bucle
+        }
+
         s.mtx_estanteria.unlock();
 
-        if (puede_transferir) {
-            // Simulación física de la transferencia (Retardo de 420ms obligatorio)
+        // ==========================================================
+        // ACCIONES FÍSICAS (Acá integramos los semáforos del profe)
+        // ==========================================================
+        if (transferir) {
+            wait(s.lugares_en_cinta); // Descuenta un lugar disponible (máx 5)
+
             s.mtx_cinta.lock();
             std::this_thread::sleep_for(std::chrono::milliseconds(420));
             s.mtx_cinta.unlock();
@@ -86,23 +106,13 @@ void consumidor(Sistema& s) {
             s.pq.push_back(p_transf);
             s.registro_cinta[p_transf.id] = tiempo_ms();
             s.mtx_estanteria.unlock();
+
+            signal(s.items_en_cinta); // Avisa que hay un nuevo ítem en la cinta
         }
 
-        // 2. INTENTAR PROCESAR (Sacar de la Cinta)
+        if (procesar) {
+            wait(s.items_en_cinta); // Descuenta el ítem que estamos por procesar
 
-        s.mtx_estanteria.lock();
-        if (!s.pq.empty()) {
-            long long tiempo_en_cinta = ahora - s.registro_cinta[s.pq.front().id];
-            if (tiempo_en_cinta >= 550) { // Cumple el mínimo de 550ms
-                p_proc = s.pq.front();
-                s.pq.erase(s.pq.begin());
-                puede_procesar = true;
-            }
-        }
-        s.mtx_estanteria.unlock();
-
-        if (puede_procesar) {
-            // Retardo físico de retiro (270ms obligatorio)
             s.mtx_cinta.lock();
             std::this_thread::sleep_for(std::chrono::milliseconds(270));
             s.mtx_cinta.unlock();
@@ -117,13 +127,8 @@ void consumidor(Sistema& s) {
                 s.proc_baja++; s.espera_baja += tiempo_total;
             }
             s.mtx_estanteria.unlock();
-        }
 
-        // 3. ESPERA PASIVA CONTROLADA
-        // Si en este ciclo no pudimos ni transferir ni procesar, cedemos el paso
-        // para no generar un bucle de consumo de CPU al 100% (Espera activa)
-        if (!puede_transferir && !puede_procesar) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            signal(s.lugares_en_cinta); // Libera un espacio en la cinta para otro paquete
         }
     }
 }
@@ -132,10 +137,10 @@ void consumidor(Sistema& s) {
 void ejecutar(int n_prod, int n_cons, int pqts, const std::string& nombre) {
     Sistema s;
 
-    // Inicialización de semáforos según la lógica de la cátedra
+    // Inicialización de semáforos clásicos requeridos
     init(s.hay_paquetes, 0);
-    init(s.lugares_en_cinta, 5); // Máximo 5 paquetes simultáneos
-    init(s.items_en_cinta, 0);
+    init(s.lugares_en_cinta, 5); // Arranca en 5 (Límite estricto de la cinta)
+    init(s.items_en_cinta, 0);   // Arranca en 0 (Cinta vacía)
 
     std::vector<std::thread> h_cons, h_prod;
     std::cout << "\n======================================================\n";
